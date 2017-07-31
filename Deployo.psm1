@@ -213,7 +213,7 @@ function New-DeployoVHD
     Start-Service -Name ShellHWDetection #Done working with the disk so we can start the service back up
 
     #Quick shortcut while rapidly testing the script, will not exist soon
-    New-DeployoOS -windowsDrive $windowsDrive -bootDrive $bootDrive -WimLocation .\IMG\boot.wim -bootType $bootType
+    New-DeployoOS -windowsDrive $windowsDrive -bootDrive $bootDrive -WimLocation '.\IMG\win10x64\install.esd' -bootType $bootType
 
     #Workaround II contd. : As mentioned, PS cmdlets will not be able to free letters they assigned to EFI system
     #partitions so we are dropping to diskpart before we dismount to free up the drive letter.
@@ -239,7 +239,6 @@ function New-DeployoVHD
 #.DESCRIPTION
 # Work in progress.
 # TODO: Index selection
-# TODO: ESD conversion
 # TODO: Unattend.xml applying
 # TODO: Additional software deployment
 #
@@ -281,6 +280,34 @@ function New-DeployoOS
         [ValidateSet('BIOS', 'UEFI')]
         [string] $BootType
     )
+
+    $extension = $WimLocation.Split('.')[$WimLocation.Split('.').Count-1]
+
+    if ($extension -eq 'ESD')
+    {
+        echo 'Found ESD, converting...'
+        
+        $wimRenamed = [string]::Concat('.', $WimLocation.Split('.')[$WimLocation.Split('.').Count-2], '.wim')
+        if (Test-Path -Path $wimRenamed)
+        {
+            #Sanity check for existing WIM
+            $title = "WIM already exists"
+            $message = "If you proceed the WIM will get the ESD content appended to it, as it exists."
+            $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", `
+                "Append the content of the ESD."
+            $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No", `
+                "Aborts the operation."
+            $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
+            $result = $host.ui.PromptForChoice($title, $message, $options, 0) 
+            if ($result -eq 1)
+            {
+                exit
+            }
+        } 
+        Export-WindowsImage -SourceImagePath $WimLocation -SourceIndex $WimIndex -DestinationImagePath $wimRenamed -CheckIntegrity -CompressionType max
+        $WimLocation = $wimRenamed
+    }
+
     echo 'Applying WIM...'
     .\tools\DISM\imagex.exe /apply $WimLocation $WimIndex ${WindowsDrive}:
     echo 'Making it bootable...'
