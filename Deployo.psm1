@@ -22,7 +22,7 @@
 #
 #.EXAMPLE
 # New-DepoloyoVM -Name testVM -RAM 4GB -Generation 2
-# Will deploy a 4GB RAM gen2 VM named testVM, trying got test.vhdx in the
+# Will deploy a 4GB RAM gen2 VM named testVM, trying for test.vhdx in the
 # default directory
 ##############################################################################
 function New-DeployoVM
@@ -131,19 +131,46 @@ function New-DeployoVHD
 
     echo 'Creating the disk...'
     $VHDPath = (Get-VMHost).VirtualHardDiskPath 
-    if ($Dynamic)
+
+    
+    $VHD = Get-VHD -Path $VHDPath\$Name$ext -ErrorAction SilentlyContinue
+    if ((Measure-Object -InputObject $VHD).count -lt 1)
     {
-        $disk = New-VHD -Path $VHDPath\$Name$ext -Dynamic -SizeBytes $Size    
+       if ($Dynamic)
+        {
+            $disk = New-VHD -Path $VHDPath\$Name$ext -Dynamic -SizeBytes $Size    
+        }
+        else
+        {
+            $disk = New-VHD -Path $VHDPath\$Name$ext -SizeBytes $Size 
+        } 
+        Mount-DiskImage -ImagePath $VHDPath\$Name$ext #Create the VHD/X and mount it
+        $diskNumber = (Get-DiskImage -ImagePath $VHDPath\$Name$ext).Number
     }
     else
     {
-        $disk = New-VHD -Path $VHDPath\$Name$ext -SizeBytes $Size 
-    }
-    Mount-DiskImage -ImagePath $VHDPath\$Name$ext #Create the VHD/X and mount it
+        #Sanity check for existing VHD
+        $title = "VHD already exists"
+        $message = "If you proceed the VHD will be WIPED of all data."
+        $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", `
+            "Reinitializes the VDH."
+        $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No", `
+             "Aborts the operation."
+        $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
+        $result = $host.ui.PromptForChoice($title, $message, $options, 0) 
+        if ($result -eq 1)
+        {
+            exit
+        }   
+
+        $disk = $VHD
+        Mount-DiskImage -ImagePath $VHDPath\$Name$ext #Create the VHD/X and mount it
+        $diskNumber = (Get-DiskImage -ImagePath $VHDPath\$Name$ext).Number
+        Clear-Disk -Number $diskNumber -RemoveData -RemoveOEM
+    } 
 
     echo 'Working on the partition table...'
-    $diskNumber = (Get-DiskImage -ImagePath $VHDPath\$Name$ext).Number
-    Initialize-Disk -Number $diskNumber -PartitionStyle $PartitionType 
+    Initialize-Disk -Number $diskNumber -PartitionStyle $PartitionType -ErrorAction SilentlyContinue
 
     Stop-Service -Name ShellHWDetection #We stop the service while working on the VHD/X to prevent dialog popups
 
@@ -158,6 +185,7 @@ function New-DeployoVHD
     }
     else
     {   
+        echo 'GPT setup...'
         #Creating an EFI system partition for boot data
         $bootPartition = New-Partition -DiskNumber $diskNumber -Size 100MB -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' 
         $bootPartition | Add-PartitionAccessPath -AssignDriveLetter
@@ -175,7 +203,7 @@ function New-DeployoVHD
         format quick fs=fat32
         assign letter $bootDrive
         exit
-        @" | diskpart  
+        @" | diskpart | Out-Null 
         
         #This is where Windows lives
         $windowsPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -GptType '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' -AssignDriveLetter | Format-Volume -FileSystem NTFS 
@@ -191,12 +219,13 @@ function New-DeployoVHD
     #partitions so we are dropping to diskpart before we dismount to free up the drive letter.
     if ($PartitionType -eq 'GPT')
     {
+        echo 'Cleaning up EFI system drive letter...'
         "@
         select disk $diskNumber
         select partition $($bootPartition.PartitionNumber)
         remove letter $bootDrive
         exit
-        @" | diskpart
+        @" | diskpart | Out-Null
     }
 
     echo 'Done, dismounting...'
@@ -233,7 +262,8 @@ function New-DeployoVHD
 #
 #.EXAMPLE
 # New-DeployoOS -windowsDrive Z -WimLocation .\IMG\win.wim -WimIndex 4 -bootType BIOS
-# Will deploy win.wim image on index 4 over the Z drive and configure BCD on Z: as well
+# Will deploy win.wim image on index 4 over the Z drive and configure BCD on 
+# Z: as well
 ##############################################################################
 function New-DeployoOS
 { 
@@ -251,7 +281,8 @@ function New-DeployoOS
         [ValidateSet('BIOS', 'UEFI')]
         [string] $BootType
     )
-
-   .\tools\DISM\imagex.exe /apply $WimLocation $WimIndex ${WindowsDrive}:
-   .\tools\BCDBoot\bcdboot.exe ${WindowsDrive}:\Windows /s ${BootDrive}:  /f $BootType
+    echo 'Applying WIM...'
+    .\tools\DISM\imagex.exe /apply $WimLocation $WimIndex ${WindowsDrive}:
+    echo 'Making it bootable...'
+    .\tools\BCDBoot\bcdboot.exe ${WindowsDrive}:\Windows /s ${BootDrive}:  /f $BootType
 }
