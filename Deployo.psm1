@@ -7,10 +7,10 @@
 # trying for a VHD of the same name.
 #
 #.PARAMETER Name
-# Name for the VM
+# Name for the VM.
 #
 #.PARAMETER RAM
-# Amount of RAM
+# Amount of RAM.
 #
 #.PARAMETER Generation
 # Generation of VM.
@@ -18,36 +18,33 @@
 #.EXAMPLE
 # New-DepoloyoVM -Name testVM
 # Will deploy a 2GB RAM gen1 VM named testVM, trying for test.vhd in the 
-# default directory
+# default directory.
 #
 #.EXAMPLE
 # New-DepoloyoVM -Name testVM -RAM 4GB -Generation 2
 # Will deploy a 4GB RAM gen2 VM named testVM, trying for test.vhdx in the
-# default directory
+# default directory.
+#
+#.EXAMPLE
+# New-DeployoVHD -Name test -PartitionType MBR -Size 25GB -Dynamic | New-DeployoOS -WimLocation .\IMG\install.wim | New-DeployoVM -Name testVM
+# Used in the full Deployo pipeline.
 ##############################################################################
 function New-DeployoVM
 { 
     param
     (
-        [parameter(Mandatory=$true)]
+        [parameter(Mandatory=$true, ParameterSetName='Pipeline')]
         [string] $Name,
-        [parameter(Mandatory=$false)]
+        [parameter(Mandatory=$false, ParameterSetName='Pipeline')]
         [UInt64] $RAM = 2GB,
-        [parameter(Mandatory=$false)]
-        [string] $Generation = 1
+        [parameter(Mandatory=$false, ParameterSetName='Pipeline')]
+        [string] $Generation = 1,
+        [Parameter(Mandatory=$True, ValueFromPipeline=$True, ParameterSetName='Pipeline')]
+        $VHDlocation
     )
 
     #Just a quick and dirty placeholder, more to come here at a later date
-    $VHDpath = (Get-VMHost).VirtualHardDiskPath
-    if ($Generation -eq 1)
-    {
-        $VHDextension = '.vhd'
-    }
-    else
-    {
-        $VHDextension = '.vhdx'
-    }
-    New-VM -Name $Name -Generation $Generation -MemoryStartupBytes $RAM -BootDevice VHD -VHDPath $VHDpath\$Name$VHDextension
+    New-VM -Name $Name -Generation $Generation -MemoryStartupBytes $RAM -BootDevice VHD -VHDPath $VHDlocation
 }
 
 ##############################################################################
@@ -68,23 +65,27 @@ function New-DeployoVM
 # Name of the VHD/X.
 #
 #.PARAMETER PartitionType
-# MBR or GPT (not recommended!)
+# MBR or GPT (not recommended!).
 #
 #.PARAMETER Size
-# Size of disk
+# Size of disk.
 #
 #.PARAMETER Dynamic
-# Will the disk by dynamically allocated or static
+# Will the disk by dynamically allocated or static.
 #
 #.EXAMPLE
 # New-DeployoVHD -Name test -PartitionType MBR -Size 25GB -Dynamic
 # 
-# Creates a MBR VHD named test that is dynamically allocated
+# Creates a MBR VHD named test that is dynamically allocated.
 #
 #.EXAMPLE
 # New-DeployoVHD -Name test -PartitionType GPT -Size 25GB
 # 
-# Creates a GPT VHD named test that is statically allocated
+# Creates a GPT VHD named test that is statically allocated.
+#
+#.EXAMPLE
+# New-DeployoVHD -Name test -PartitionType MBR -Size 25GB -Dynamic | New-DeployoOS -WimLocation .\IMG\install.wim | New-DeployoVM -Name testVM
+# Used in the full Deployo pipeline.
 ##############################################################################
 function New-DeployoVHD 
 {    
@@ -99,16 +100,17 @@ function New-DeployoVHD
         [UInt64] $Size,
         [switch] $Dynamic
     )
-     
+
+    [hashtable] $diskData = @{'VHDName' = $Name}
+    $diskData.Add('partitionType', $PartitionType)
+    
     if ($PartitionType -eq 'MBR')
     { 
-        $ext = '.vhd'
-        $bootType = 'BIOS'
+        $diskData.Add('VHDExtension', '.vhd')
     }
     else
     {
-        $ext = '.vhdx' #UEFI disks are for gen2 VMs so VHDX
-        $bootType = 'UEFI'
+        $diskData.Add('VHDExtension', '.vhdx') #UEFI disks are for gen2 VMs so VHDX
     }
 
     $vmms = Get-Service vmms
@@ -116,36 +118,35 @@ function New-DeployoVHD
     {
         0 
         {
-            echo 'VMMS service does not exist. You must have Hyper-V installed for this to work, aborting.'
+            Write-Verbose 'VMMS service does not exist. You must have Hyper-V installed for this to work, aborting.'
             exit
         }
         1 
         {
             if ((Get-Service $vmms.Name).Status -ne 'Running')
             {
-                echo 'VMMS is here, but is not running, starting the service...'
+                Write-Verbose 'VMMS is here, but is not running, starting the service...'
                 Start-Service $vmms   
             }
         }
     }
 
-    echo 'Creating the disk...'
-    $VHDPath = (Get-VMHost).VirtualHardDiskPath 
-
-    
-    $VHD = Get-VHD -Path $VHDPath\$Name$ext -ErrorAction SilentlyContinue
+    Write-Verbose 'Creating the disk...'
+    $diskData.Add('VHDPath', (Get-VMHost).VirtualHardDiskPath) 
+    $VHDFullLocation = $diskData.VHDPath + '\' + $diskData.VHDName + $diskData.VHDExtension
+    $VHD = Get-VHD -Path $VHDFullLocation -ErrorAction SilentlyContinue
     if ((Measure-Object -InputObject $VHD).count -lt 1)
     {
        if ($Dynamic)
         {
-            $disk = New-VHD -Path $VHDPath\$Name$ext -Dynamic -SizeBytes $Size    
+            $disk = New-VHD -Path $VHDFullLocation -Dynamic -SizeBytes $Size    
         }
         else
         {
-            $disk = New-VHD -Path $VHDPath\$Name$ext -SizeBytes $Size 
+            $disk = New-VHD -Path $VHDFullLocation -SizeBytes $Size 
         } 
-        Mount-DiskImage -ImagePath $VHDPath\$Name$ext #Create the VHD/X and mount it
-        $diskNumber = (Get-DiskImage -ImagePath $VHDPath\$Name$ext).Number
+        Mount-DiskImage -ImagePath $VHDFullLocation #Create the VHD/X and mount it
+        $diskNumber = (Get-DiskImage -ImagePath $VHDFullLocation).Number
     }
     else
     {
@@ -164,32 +165,31 @@ function New-DeployoVHD
         }   
 
         $disk = $VHD
-        Mount-DiskImage -ImagePath $VHDPath\$Name$ext #Create the VHD/X and mount it
-        $diskNumber = (Get-DiskImage -ImagePath $VHDPath\$Name$ext).Number
+        Mount-DiskImage -ImagePath $VHDFullLocation #Create the VHD/X and mount it
+        $diskNumber = (Get-DiskImage -ImagePath $VHDFullLocation).Number
         Clear-Disk -Number $diskNumber -RemoveData -RemoveOEM
     } 
 
-    echo 'Working on the partition table...'
-    Initialize-Disk -Number $diskNumber -PartitionStyle $PartitionType -ErrorAction SilentlyContinue
+    Write-Verbose 'Working on the partition table...'
+    Initialize-Disk -Number $diskNumber -PartitionStyle $diskData.partitionType -ErrorAction SilentlyContinue
 
     Stop-Service -Name ShellHWDetection #We stop the service while working on the VHD/X to prevent dialog popups
 
-    if ($PartitionType -eq 'MBR')
+    if ($diskData.partitionType -eq 'MBR')
     {
-        echo 'MBR setup...'
-        $bootPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -IsActive -AssignDriveLetter | Format-Volume -FileSystem NTFS 
-        $bootDrive = ($bootPartition | Get-Partition).DriveLetter 
-
-        $windowsDrive = $bootDrive 
+        Write-Verbose 'MBR setup...'
+        $bootPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -IsActive -AssignDriveLetter | Format-Volume -FileSystem NTFS  
+        $diskData.Add('bootDrive', ($bootPartition | Get-Partition).DriveLetter)
+        $diskData.Add('windowsDrive', $diskData.bootDrive )
         #Straightforward MBR setup, one partition covering the full disk, the boot is on the same partition as Windows
     }
     else
     {   
-        echo 'GPT setup...'
+        Write-Verbose 'GPT setup...'
         #Creating an EFI system partition for boot data
         $bootPartition = New-Partition -DiskNumber $diskNumber -Size 100MB -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' 
         $bootPartition | Add-PartitionAccessPath -AssignDriveLetter
-        $bootDrive = ($bootPartition | Get-Partition).DriveLetter
+        $diskData.Add('bootDrive', ($bootPartition | Get-Partition).DriveLetter)
         #Workaround I : Format-Volume cannot format an EFI system partition, it will fail trying, so we are dropping to 
         #diskpart for the formatting
         #Workaround II : Any assigned drive letters by PowerShell on EFI system partitions will work, but PS is not going
@@ -201,35 +201,34 @@ function New-DeployoVHD
         select disk $diskNumber
         select partition $($bootPartition.PartitionNumber)
         format quick fs=fat32
-        assign letter $bootDrive
+        assign letter $diskData.bootDrive
         exit
         @" | diskpart | Out-Null 
         
         #This is where Windows lives
         $windowsPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -GptType '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' -AssignDriveLetter | Format-Volume -FileSystem NTFS 
-        $windowsDrive = ($windowsPartition | Get-Partition).DriveLetter    
+        $diskData.Add('windowsDrive', ($windowsPartition | Get-Partition).DriveLetter)    
     }
 
     Start-Service -Name ShellHWDetection #Done working with the disk so we can start the service back up
-
-    #Quick shortcut while rapidly testing the script, will not exist soon
-    New-DeployoOS -windowsDrive $windowsDrive -bootDrive $bootDrive -WimLocation '.\IMG\win10x64\install.esd' -bootType $bootType
-
+   
+   
     #Workaround II contd. : As mentioned, PS cmdlets will not be able to free letters they assigned to EFI system
     #partitions so we are dropping to diskpart before we dismount to free up the drive letter.
-    if ($PartitionType -eq 'GPT')
+    if ($diskData.partitionType -eq 'GPT')
     {
         echo 'Cleaning up EFI system drive letter...'
         "@
         select disk $diskNumber
         select partition $($bootPartition.PartitionNumber)
-        remove letter $bootDrive
+        remove letter $diskData.bootDrive
         exit
         @" | diskpart | Out-Null
     }
 
-    echo 'Done, dismounting...'
-    Dismount-DiskImage -ImagePath $VHDPath\$Name$ext
+    Write-Verbose 'Done, dismounting...'
+    Dismount-DiskImage -ImagePath $VHDFullLocation
+    Write-Output ($diskData -as [hashtable])
 }
 
 ##############################################################################
@@ -238,78 +237,159 @@ function New-DeployoVHD
 #
 #.DESCRIPTION
 # Work in progress.
-# TODO: Index selection
 # TODO: Unattend.xml applying
 # TODO: Additional software deployment
 #
 # This function deploys a WIM over a VHD. Currently in a very crude form,
-# be mindfull it expects the DISM tools in .\tools relative to from where 
+# be mindful it expects the DISM tools in .\tools relative to from where 
 # you are running the function.
 #
 #.PARAMETER windowsDrive
-# Drive letter (ex. G) for the volume where \Windows is
+# Drive letter for the volume where \Windows is.
 #
 #.PARAMETER bootDrive
-# Drive letter (ex. G) for the volume where the boot data should be
+# Drive letter for the volume where the boot data should be.
 #
 #.PARAMETER BootType
-# BIOS for MBR disks or UEFI for GPT based disks
+# BIOS for MBR disks or UEFI for GPT based disks.
+#
+#.PARAMETER diskData
+# A hashtable only used if a vhd is getting piped from New-DepolyoVHD.
 #
 #.EXAMPLE
 # New-DeployoOS -windowsDrive Z -bootDrive S -WimLocation .\IMG\win.wim -bootType UEFI
-# Will deploy win.wim image on index 1 over the Z drive and configure BCD on S:
+# Will deploy win.wim image on index 1 over the Z drive and configure BCD on S:.
 #
 #.EXAMPLE
 # New-DeployoOS -windowsDrive Z -WimLocation .\IMG\win.wim -WimIndex 4 -bootType BIOS
 # Will deploy win.wim image on index 4 over the Z drive and configure BCD on 
-# Z: as well
+# Z: as well.
+#
+#.EXAMPLE
+# New-DeployoVHD -Name test -PartitionType MBR -Size 25GB -Dynamic | New-DeployoOS -WimLocation .\IMG\install.wim | New-DeployoVM -Name testVM
+# Used in the full Deployo pipeline.
 ##############################################################################
 function New-DeployoOS
 { 
     param
     (
-        [parameter(Mandatory=$true)]
+
+        [parameter(Mandatory=$true, ParameterSetName='Standard in')]
         [string] $WindowsDrive,
-        [parameter(Mandatory=$false)]
+        [parameter(Mandatory=$false, ParameterSetName='Standard in')]
         [string] $BootDrive = $WindowsDrive,
-        [parameter(Mandatory=$true)]
+        [parameter(Mandatory=$true, ParameterSetName='Standard in')]
+        [Parameter(Mandatory=$true, ParameterSetName='Pipeline')]
         [string] $WimLocation,
-        [parameter(Mandatory=$false)]
+        [parameter(Mandatory=$false, ParameterSetName='Standard in')]
+        [Parameter(Mandatory=$false, ParameterSetName='Pipeline')]
         [int] $WimIndex = 1,
-        [parameter(Mandatory=$true)]
+        [parameter(Mandatory=$true, ParameterSetName='Standard in')]
         [ValidateSet('BIOS', 'UEFI')]
-        [string] $BootType
+        [string] $BootType,
+        [Parameter(Mandatory=$True, ValueFromPipeline=$True, ParameterSetName='Pipeline')]
+        $diskData
     )
 
-    $extension = $WimLocation.Split('.')[$WimLocation.Split('.').Count-1]
-
-    if ($extension -eq 'ESD')
-    {
-        echo 'Found ESD, converting...'
-        
-        $wimRenamed = [string]::Concat('.', $WimLocation.Split('.')[$WimLocation.Split('.').Count-2], '.wim')
-        if (Test-Path -Path $wimRenamed)
+        if ($PSCmdlet.ParameterSetName -eq 'Pipeline')
         {
-            #Sanity check for existing WIM
-            $title = "WIM already exists"
-            $message = "If you proceed the WIM will get the ESD content appended to it, as it exists."
-            $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", `
-                "Append the content of the ESD."
-            $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No", `
-                "Aborts the operation."
-            $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
-            $result = $host.ui.PromptForChoice($title, $message, $options, 0) 
-            if ($result -eq 1)
+            $WindowsDrive = $diskData.windowsDrive
+            $BootDrive = $diskData.bootDrive     
+            if ($diskData.partitionType -eq 'MBR')
             {
-                exit
+                $BootType = 'BIOS'
             }
-        } 
-        Export-WindowsImage -SourceImagePath $WimLocation -SourceIndex $WimIndex -DestinationImagePath $wimRenamed -CheckIntegrity -CompressionType max
-        $WimLocation = $wimRenamed
-    }
+            else
+            {
+                $BootType = 'UEFI'
+            }
+            $VHDLocation = $diskData.VHDPath +'\' + $diskData.VHDName + $diskData.VHDExtension            
+        }
 
-    echo 'Applying WIM...'
-    .\tools\DISM\imagex.exe /apply $WimLocation $WimIndex ${WindowsDrive}:
-    echo 'Making it bootable...'
-    .\tools\BCDBoot\bcdboot.exe ${WindowsDrive}:\Windows /s ${BootDrive}:  /f $BootType
+        $WimLocation = 'C:\Apex\P\IMG\boot.wim'
+        $extension = $WimLocation.Split('.')[$WimLocation.Split('.').Count-1]
+        
+        if ($extension -eq 'ESD')
+        {
+            Write-Verbose 'Found ESD, converting...'
+            $wimRenamed = [string]::Concat('.', $WimLocation.Split('.')[$WimLocation.Split('.').Count-2], '.wim')
+            if (Test-Path -Path $wimRenamed)
+            {
+                #Sanity check for existing WIM
+                $title = "WIM already exists"
+                $message = "If you proceed the WIM will get the ESD content appended to it, as it exists."
+                $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", `
+                    "Append the content of the ESD."
+                $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No", `
+                    "Aborts the operation."
+                $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
+                $result = $host.ui.PromptForChoice($title, $message, $options, 0) 
+                if ($result -eq 1)
+                {
+                    exit
+                }
+            } 
+            Export-WindowsImage -SourceImagePath $WimLocation -SourceIndex $WimIndex -DestinationImagePath $wimRenamed -CheckIntegrity -CompressionType max
+            $WimLocation = $wimRenamed
+        }
+
+        Mount-DiskImage -ImagePath $VHDLocation
+
+        Write-Verbose "Applying WIM to ${WindowsDrive}:..."
+        .\tools\DISM\imagex.exe /apply $WimLocation $WimIndex ${WindowsDrive}:
+        Write-Verbose "Installing bootloader for ${WindowsDrive}: to ${BootDrive}:"
+        .\tools\BCDBoot\bcdboot.exe ${WindowsDrive}:\Windows /s ${BootDrive}:  /f $BootType 
+
+        Dismount-DiskImage -ImagePath $VHDLocation
+        Write-Output $VHDLocation
+}
+
+##############################################################################
+#.SYNOPSIS
+# Gets info on all indexes in a WIM.
+#
+#.DESCRIPTION
+# A simple function that will output nicely formatted information on all 
+# editions present in a WIM file. be mindful it expects the DISM tools in 
+# .\tools relative to from where you are running the function. 
+#
+#.PARAMETER WIM
+# WIM file that we are interested in.
+#
+#.EXAMPLE
+# Get-WimOSEditions -WIM .\IMG\install.wim
+# Will list information for all indexes in .\IMG\install.wim.
+##############################################################################
+function Get-WimOSEditions
+{
+    param
+    (
+        [parameter(Mandatory=$true)]
+        [string]$WIM
+    )
+
+    $dry = .\tools\DISM\imagex.exe /info $WIM
+    foreach ($line in $dry)
+    {
+        if($line -ilike '*<IMAGE INDEX*')
+        {
+            $clean += 'Index ' + ($line -split '"')[1]
+        }
+        elseif ($line -ilike '*<ARCH>*')
+        {
+            if ($line -ilike '*9*')
+            {
+                $clean += ' is a x64 version of '
+            } 
+            else
+            {
+                $clean += ' is a x86 version of '
+            }
+        }
+        elseif ($line -ilike '*<DESCRIPTION>*')
+        {
+            $clean += (($line -split '>')[1] -split '<')[0] + "`n"
+        }
+    }
+    $clean 
 }
